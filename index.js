@@ -1,102 +1,86 @@
-const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
-const nodemailer = require('nodemailer');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { LambdaClient, UpdateFunctionConfigurationCommand } = require('@aws-sdk/client-lambda');
 const fs = require('fs');
 const path = require('path');
-require('dotenv').config();
+const nodemailer = require('nodemailer');
 
-const s3Client = new S3Client({ region: process.env.AWS_REGION });
-
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
+const s3 = new S3Client({ region: 'eu-north-1' });
+const lambda = new LambdaClient({ region: 'eu-north-1' });
 
 exports.handler = async (event) => {
-    const bucketName = process.env.BUCKET_NAME;
-    const filePath = path.join(__dirname, 'tmp', 'sample.csv');
-    const objectKey = 'sample.csv';
-    const flagFilePath = path.join(__dirname, 'tmp', 'emailSent.flag');
+    console.log('Event received:', JSON.stringify(event, null, 2));
 
-    if (fs.existsSync(flagFilePath)) {
-        console.log('Email has already been sent. Skipping email sending.');
+    const bucketName = process.env.BUCKET_NAME;
+    const keyName = 'sample.csv';
+    const filePath = path.resolve(__dirname, 'temp/sample.csv');
+
+    if (!fs.existsSync(filePath)) {
+        console.error('File not found:', filePath);
         return {
-            statusCode: 200,
-            body: JSON.stringify({ message: 'Email has already been sent.' })
+            statusCode: 500,
+            body: JSON.stringify('File not found in /temp directory.'),
         };
     }
 
+    const fileContent = fs.readFileSync(filePath);
+
+    const params = {
+        Bucket: bucketName,
+        Key: keyName,
+        Body: fileContent,
+    };
+
     try {
-        // Read the file from the local system
-        const fileContent = fs.readFileSync(filePath);
+      
+        await s3.send(new PutObjectCommand(params));
+        console.log(`File uploaded successfully to ${bucketName}/${keyName}`);
 
-        // Upload the file to S3
-       const putObjectParams = {
-            Bucket: bucketName,
-            Key: objectKey,
-            Body: fileContent,
-        };
+        const fileUrl = `https://${bucketName}.s3.amazonaws.com/${keyName}`;
 
-        await s3Client.send(new PutObjectCommand(putObjectParams));
-        console.log(`File uploaded successfully at ${bucketName}/${objectKey}`);
-
-        // Get the file URL
-        const fileUrl = `https://${bucketName}.s3.amazonaws.com/${objectKey}`;
-        console.log('File URL:', fileUrl);
-
-        // Sleep for 1 second to avoid hitting Mailtrap rate limit
-        await sleep(1000);
-
-        // Email details
-        const SENDER = "manmohan.zinreet@gmail.com";
-        const RECIPIENT = "manmohan.zinreet@gmail.com";
-        const SUBJECT = "AWS Lambda Email Test";
-        const BODY_HTML = `
-            <html>
-            <head></head>
-            <body>
-              <h1>AWS Lambda Email Test</h1>
-              <p>This email was sent with AWS Lambda using Mailtrap SMTP 1201</p>
-              <p>File URL: <a href="${fileUrl}">${fileUrl}</a></p>
-            </body>
-            </html>
-        `;
-
-        let transporter = nodemailer.createTransport({
-            host: "smtp.mailtrap.io",
-            port: process.env.MAIL_PORT,
+        const transporter = nodemailer.createTransport({
+            host: process.env.MAILTRAP_HOST,
+            port: process.env.MAILTRAP_PORT,
             auth: {
-                user: process.env.MAIL_USER,
-                pass: process.env.MAIL_PASSWORD
-            }
+                user: process.env.MAILTRAP_USER,
+                pass: process.env.MAILTRAP_PASS,
+            },
+            authMethod: 'PLAIN',
         });
 
-        let mailOptions = {
-            from: SENDER,
-            to: RECIPIENT,
-            subject: SUBJECT,
-            html: BODY_HTML
+        const mailOptions = {
+            from: 'your@email.com',
+            to: 'recipient@email.com',
+            subject: 'File Uploaded Successfully',
+            text: `File uploaded successfully to S3. Here is the file URL: ${fileUrl}`,
         };
 
-        // Send the email
-        let info = await transporter.sendMail(mailOptions);
-        console.log(`Email sent! Message ID: ${info.messageId}`);
+        await transporter.sendMail(mailOptions);
+        console.log('Email sent successfully.');
 
-        // Create a flag file to indicate that the email has been sent
-        // fs.writeFileSync(flagFilePath, 'Email sent');
-        // console.log(`Flag file created: ${flagFilePath}`);
+        // Delete file from temp folder
+        // fs.unlinkSync(filePath);
+        // console.log('File deleted from temp folder.');
 
-        // Delete the local file
-        fs.unlinkSync(filePath);
-        console.log(`Local file deleted: ${filePath}`);
+        // await fs.promises.unlink(filePath);
+        // console.log('File deleted from temp folder.');
+
+        // Disable Lambda function
+        const updateParams = {
+            FunctionName: 'S3-trigger-function',
+            Enabled: false,
+        };
+        await lambda.send(new UpdateFunctionConfigurationCommand(updateParams));
+        console.log('Lambda function disabled successfully.');
 
         return {
             statusCode: 200,
-            body: JSON.stringify({ message: 'Email sent successfully!', messageId: info.messageId, fileUrl: fileUrl })
+            body: JSON.stringify('File uploaded successfully, email sent, and Lambda function disabled.'),
         };
-    } catch (err) {
-        console.error(err, err.stack);
+    } catch (error) {
+        console.error('Error uploading file, sending email, or disabling Lambda function:', error);
         return {
             statusCode: 500,
-            body: JSON.stringify(`Error: ${err.message}`)
+            body: JSON.stringify('Error uploading file, sending email, or disabling Lambda function.'),
         };
     }
 };
